@@ -221,4 +221,8 @@ Full design: [docs/DESIGN.md](docs/DESIGN.md).
 
 ---
 
+## License
+
+[MIT](LICENSE) © 2026 Sarthak Wage
+
 *Industrial IoT Engineering — mini project.*
