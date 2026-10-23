@@ -97,9 +97,16 @@
             </div>
           </div>
           <div class="cam-inset">
-            <div class="cam-head"><span>CAM-201 · inspection</span><span id="camMs" class="muted">—</span></div>
-            <canvas id="camCanvas" width="160" height="120"></canvas>
-            <div class="cam-foot"><span id="camVerdict" class="verdict">WAITING</span><span id="camStats" class="muted">0 inspected</span></div>
+            <div class="cam-head"><span>Vision tunnel · 5 cameras</span><span id="camMs" class="muted">—</span></div>
+            <div class="cam-grid">
+              <figure data-cam="CAM202"><canvas id="cam-CAM202" width="128" height="96"></canvas><figcaption>L · 202</figcaption></figure>
+              <figure data-cam="CAM201"><canvas id="cam-CAM201" width="128" height="96"></canvas><figcaption>TOP · 201</figcaption></figure>
+              <figure data-cam="CAM203"><canvas id="cam-CAM203" width="128" height="96"></canvas><figcaption>R · 203</figcaption></figure>
+              <figure data-cam="CAM205"><canvas id="cam-CAM205" width="128" height="96"></canvas><figcaption>BACK · 205</figcaption></figure>
+              <div class="cam-fused"><span id="camVerdict" class="verdict">WAITING</span><span id="camReason" class="muted"></span></div>
+              <figure data-cam="CAM204"><canvas id="cam-CAM204" width="128" height="96"></canvas><figcaption>FRONT · 204</figcaption></figure>
+            </div>
+            <div class="cam-foot"><span id="camStats" class="muted">0 inspected</span></div>
           </div>
           <div class="replay-badge" id="replayBadge" hidden>
             <span class="rec-dot"></span><b>REPLAY</b><span id="replayBadgeTime" class="mono"></span>
@@ -151,10 +158,13 @@
         <aside class="side right" data-tab-scope>
           <nav class="tabs">
             <button data-tab="twin" class="on">Health</button>
-            <button data-tab="prod">Production</button>
+            <button data-tab="vision">Vision</button>
+            <button data-tab="pdm">PdM</button>
+            <button data-tab="prod">OEE</button>
             <button data-tab="spc">SPC</button>
-            <button data-tab="whatif">What-if</button>
-            <button data-tab="maint">Maintenance <span id="woCount" class="count"></span></button>
+            <button data-tab="whatif">Optimise</button>
+            <button data-tab="maint">Maint. <span id="woCount" class="count"></span></button>
+            <button data-tab="validate">Validate</button>
           </nav>
 
           <div class="tab-pane on" data-pane="twin">
@@ -174,6 +184,13 @@
               <p class="note" id="healthNote"></p>
             </section>
             <section class="panel">
+              <h2>Learned anomaly model <span class="sub">PCA · Hotelling T² + Q</span></h2>
+              <div class="spc-status" id="anStatus"></div>
+              <div class="mini-chart" id="anChart"></div>
+              <div class="contrib" id="anContrib"></div>
+              <div class="btn-row"><button id="anRetrain">Re-learn normal behaviour</button></div>
+            </section>
+            <section class="panel">
               <h2>Thermal forecast <span class="sub">1st-order winding model</span></h2>
               <div class="metric-grid">
                 <div class="metric"><span>Winding temp</span><b id="tNow">—</b></div>
@@ -186,6 +203,70 @@
             <section class="panel">
               <h2>Diagnostics</h2>
               <ul class="diag" id="diagList"></ul>
+            </section>
+          </div>
+
+          <div class="tab-pane" data-pane="vision">
+            <section class="panel">
+              <h2>Last inspection <span class="sub">fused verdict of the 5-camera tunnel</span></h2>
+              <div id="visLast" class="vis-last"><p class="note">Waiting for the first carton at PE-201.</p></div>
+            </section>
+            <section class="panel">
+              <h2>Cameras <span class="sub">untick to exclude a camera from the decision</span></h2>
+              <table class="cams" id="camTable"></table>
+            </section>
+            <section class="panel">
+              <h2>Coverage <span class="sub">why one camera is not enough</span></h2>
+              <div class="metric-grid" id="visCoverage"></div>
+              <div class="face-bars" id="visFaces"></div>
+            </section>
+            <section class="panel">
+              <h2>Accept / reject rules</h2>
+              <ol class="recipe">
+                <li><b>Trigger.</b> The leading edge of a carton breaks PE-201 → the PLC assigns a tracking ID and all five cameras capture at once.</li>
+                <li><b>Find the carton.</b> Pixels with cardboard colour (hue 15–50°, saturation &gt; 0.28) are the carton; belt, frame and background are ignored.</li>
+                <li><b>Look for defects</b> inside the carton outline: red pixels (hue &lt; 14° or &gt; 340°) = <i>wrong label</i>; blue pixels (hue 190–265°) = <i>ink contamination</i>.</li>
+                <li><b>Per camera:</b> DEFECT if defect pixels &gt; 5 % of the carton area · NO_READ if the image is dark (camera fault) or the carton covers &lt; 3 % of it · otherwise GOOD.</li>
+                <li><b>Fusion:</b> any camera DEFECT → <b>reject</b> · any camera NO_READ → <b>reject (fail-safe)</b> · all cameras GOOD → <b>accept</b>.</li>
+                <li><b>Action:</b> the verdict is stored against the tracking ID. At PE-301 the PLC fires pusher YV-301 for anything that is not GOOD, including cartons whose verdict did not arrive in time.</li>
+              </ol>
+              <p class="note">The bottom face is not inspected: that would need a camera under a gap between two belts (future scope).</p>
+            </section>
+          </div>
+
+          <div class="tab-pane" data-pane="pdm">
+            <section class="panel">
+              <h2>Bearing condition <span class="sub">VT-001 · M-001 drive end · ISO 10816-1 class I</span></h2>
+              <div class="iso" id="isoScale"></div>
+              <div class="metric-grid" id="vibMetrics"></div>
+              <p class="advisory" id="vibDiag"></p>
+            </section>
+            <section class="panel">
+              <h2>Vibration spectrum <span class="sub">1024-point FFT · 2.5 Hz lines · velocity</span></h2>
+              <div class="mini-chart tall" id="specChart"></div>
+              <p class="note mono" id="specFreqs"></p>
+            </section>
+            <section class="panel">
+              <h2>P-F curve &amp; remaining useful life <span class="sub">vibration trend → ISO zone D</span></h2>
+              <div class="metric-grid">
+                <div class="metric"><span>RUL to failure (F)</span><b id="rulVal">—</b></div>
+                <div class="metric"><span>Trend</span><b id="rulSlope">—</b></div>
+                <div class="metric"><span>P detected (zone C)</span><b id="pfP">—</b></div>
+                <div class="metric"><span>P-F interval</span><b id="pfInt">—</b></div>
+              </div>
+              <div class="mini-chart" id="rulChart"></div>
+              <p class="note" id="rulNote"></p>
+            </section>
+            <section class="panel">
+              <h2>Strategy economics <span class="sub">annual cost per bearing position</span></h2>
+              <div class="econ-inputs">
+                <label>Downtime ₹/min <input type="number" id="ecDown" value="500" min="0" step="50" /></label>
+                <label>Bearing ₹ <input type="number" id="ecPart" value="1200" min="0" step="100" /></label>
+                <label>Mean life h <input type="number" id="ecLife" value="4000" min="500" step="250" /></label>
+                <label>Detection % <input type="number" id="ecDetect" value="98" min="0" max="100" step="1" /></label>
+              </div>
+              <table class="cmp econ" id="econTable"></table>
+              <p class="note" id="econNote"></p>
             </section>
           </div>
 
@@ -248,7 +329,25 @@
 
           <div class="tab-pane" data-pane="whatif">
             <section class="panel">
-              <h2>Scenario <span class="sub">plant model, ≈ 10 000× real time</span></h2>
+              <h2>Speed optimiser <span class="sub">sweeps 0.15–0.45 m/s · motor kept below 80 °C</span></h2>
+              <div class="form-row">
+                <label for="optObjective">Objective</label>
+                <select id="optObjective">
+                  <option value="throughput">Max good cartons / h</option>
+                  <option value="energy">Min energy / carton</option>
+                  <option value="oee">Max OEE</option>
+                </select>
+                <span></span>
+              </div>
+              <div class="btn-row">
+                <button id="optRun" class="primary">Find optimal speed</button>
+                <button id="optApply" disabled>Apply optimum</button>
+              </div>
+              <p class="note" id="optStatus">Uses the horizon and current condition set below.</p>
+              <div class="opt-chart" id="optChart"></div>
+            </section>
+            <section class="panel">
+              <h2>Scenario comparison <span class="sub">plant model, ≈ 10 000× real time</span></h2>
               <div class="form-row"><label for="wiSpeed">Proposed speed</label><input type="range" id="wiSpeed" min="0.15" max="0.45" step="0.01" value="0.40" /><b id="wiSpeedVal">0.40 m/s</b></div>
               <div class="form-row">
                 <label for="wiHorizon">Horizon</label>
@@ -284,6 +383,36 @@
               <p class="note">Completing a work order performs the repair in the virtual plant.</p>
             </section>
           </div>
+
+          <div class="tab-pane" data-pane="validate">
+            <section class="panel">
+              <h2>Validation benchmark <span class="sub">twin vs injected faults</span></h2>
+              <p class="note">Runs the twin's own detection pipeline against randomised faults on private copies of the plant (thousands of times faster than real time) and measures how well it performs.</p>
+              <div class="form-row">
+                <label for="bmRuns">Runs per fault</label>
+                <select id="bmRuns"><option value="5">5</option><option value="10" selected>10</option><option value="20">20</option></select>
+                <span></span>
+              </div>
+              <div class="btn-row">
+                <button id="bmRun" class="primary">Run benchmark</button>
+                <button id="bmExport" disabled>Export CSV</button>
+              </div>
+              <div class="progress"><div id="bmBar"></div></div>
+              <p class="note" id="bmStatus"></p>
+            </section>
+            <section class="panel">
+              <h2>Detection <span class="sub">time from fault injection to alarm</span></h2>
+              <table class="bm" id="bmTable"></table>
+            </section>
+            <section class="panel">
+              <h2>Diagnosis <span class="sub">rows: injected fault · columns: rule-based diagnosis</span></h2>
+              <table class="confusion" id="bmConfusion"></table>
+            </section>
+            <section class="panel">
+              <h2>False alarms <span class="sub">healthy running after baseline</span></h2>
+              <dl class="kv" id="bmFalse"></dl>
+            </section>
+          </div>
         </aside>
 
         <aside class="drawer" id="simDrawer" hidden>
@@ -295,6 +424,7 @@
             <h2>Fault injection</h2>
             <div class="form-row"><label for="fSlip">Belt slip</label><input type="range" id="fSlip" min="0" max="35" step="1" value="0" /><b id="fSlipVal">0 %</b></div>
             <div class="form-row"><label for="fWear">Bearing wear</label><input type="range" id="fWear" min="0" max="100" step="5" value="0" /><b id="fWearVal">0 %</b></div>
+            <div class="form-row" title="Outer-race wear growing over time (demo-accelerated)"><label for="fWearRate">Wear progression</label><input type="range" id="fWearRate" min="0" max="60" step="5" value="0" /><b id="fWearRateVal">0 %/min</b></div>
             <div class="form-row"><label for="fDefect">Defect rate</label><input type="range" id="fDefect" min="0" max="40" step="1" value="12" /><b id="fDefectVal">12 %</b></div>
             <div class="form-row">
               <label for="fSensor">Photo-eye failure</label>
@@ -307,9 +437,21 @@
               </select>
               <span></span>
             </div>
+            <div class="form-row">
+              <label for="fCam">Camera failure</label>
+              <select id="fCam">
+                <option value="NONE">None</option>
+                <option value="CAM201">CAM-201 top</option>
+                <option value="CAM202">CAM-202 left</option>
+                <option value="CAM203">CAM-203 right</option>
+                <option value="CAM204">CAM-204 front</option>
+                <option value="CAM205">CAM-205 back</option>
+              </select>
+              <span></span>
+            </div>
             <div class="btn-row">
               <button id="fJam" class="toggle">Obstruct zone 2</button>
-              <button id="fCam" class="toggle">Camera failure</button>
+              <button id="fRub" class="toggle" title="A fault the twin's rules were never written for">Misalign zone-3 guide</button>
             </div>
             <div class="btn-row">
               <button id="fEstop" class="toggle danger">Press E-stop ES-001</button>

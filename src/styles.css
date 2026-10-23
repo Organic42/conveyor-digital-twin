@@ -766,6 +766,9 @@ input[type='range'] {
 .tag-label .tv:empty {
   display: none;
 }
+.tag-label.anchor-only {
+  display: none;
+}
 .tag-label.minor {
   font-weight: 500;
   color: var(--muted);
@@ -818,7 +821,7 @@ input[type='range'] {
   position: absolute;
   top: 8px;
   right: 8px;
-  width: 182px;
+  width: 262px;
   background: rgba(30, 34, 38, 0.92);
   color: #d9dde0;
   border-radius: 4px;
@@ -834,13 +837,55 @@ input[type='range'] {
 .cam-inset .muted {
   color: #9aa1a8;
 }
-#camCanvas {
-  display: block;
-  width: 168px;
-  height: 126px;
+.cam-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
   margin: 5px 0;
+}
+.cam-grid figure {
+  margin: 0;
+  position: relative;
+  border: 2px solid #4b5560;
+  border-radius: 2px;
   background: #000;
-  image-rendering: pixelated;
+}
+.cam-grid figure.v-defect {
+  border-color: var(--p1);
+}
+.cam-grid figure.v-no_read {
+  border-color: var(--p3);
+}
+.cam-grid figure.off {
+  opacity: 0.35;
+  border-style: dashed;
+}
+.cam-grid canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+}
+.cam-grid figcaption {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  font: 600 8.5px var(--mono);
+  background: rgba(0, 0, 0, 0.6);
+  padding: 0 3px;
+  color: #dfe3e6;
+}
+.cam-fused {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  text-align: center;
+  font-size: 10px;
+}
+.cam-fused .verdict {
+  font-size: 12px;
+  padding: 1px 6px;
 }
 .verdict {
   font: 700 11px var(--mono);
@@ -1086,12 +1131,15 @@ input[type='range'] {
   z-index: 1;
   background: var(--bg);
 }
+.side.right .tabs {
+  flex-wrap: wrap;
+}
 .tabs button {
   border: 1px solid transparent;
   border-bottom: none;
   background: none;
   border-radius: 3px 3px 0 0;
-  padding: 6px 8px;
+  padding: 6px 7px;
   min-height: 0;
   color: var(--muted);
   font-size: 12px;
@@ -1558,6 +1606,253 @@ td.abn {
   font-size: 12px;
 }
 
+/* predictive, vision, optimiser, validation */
+.mini-chart,
+.opt-chart {
+  height: 150px;
+  margin-top: 6px;
+  background: var(--trend-bg);
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.opt-chart {
+  height: 190px;
+}
+.opt-chart:empty {
+  display: none;
+}
+.contrib {
+  margin-top: 4px;
+}
+.face-row {
+  display: grid;
+  grid-template-columns: 140px 1fr 44px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin-top: 3px;
+}
+.face-row .bar {
+  height: 8px;
+  background: var(--bar-bg);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.face-row .bar div {
+  height: 100%;
+  background: var(--bar-fill);
+}
+.face-row.abn .bar div {
+  background: var(--p2);
+}
+.face-row b {
+  font-family: var(--mono);
+  text-align: right;
+}
+.face-row span {
+  text-transform: capitalize;
+}
+.vis-verdict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  margin-bottom: 6px;
+}
+.vis-verdict .verdict.v-good {
+  background: var(--chip-dark);
+  color: var(--chip-dark-text);
+}
+.cams {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.cams th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--line);
+  padding: 3px 4px;
+}
+.cams td {
+  padding: 3px 4px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.cams tr.dim td {
+  color: var(--dim);
+}
+.cams .abn {
+  color: var(--abn);
+  font-weight: 600;
+}
+.recipe {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.progress {
+  height: 6px;
+  margin-top: 8px;
+  background: var(--bar-bg);
+  border-radius: 3px;
+  overflow: hidden;
+}
+#bmBar {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+.bm,
+.confusion {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.bm th,
+.bm td,
+.confusion th,
+.confusion td {
+  padding: 4px 5px;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: right;
+  font-weight: 400;
+}
+.bm th:first-child,
+.confusion th:first-child {
+  text-align: left;
+  color: var(--muted);
+}
+.bm thead th,
+.confusion thead th {
+  font-weight: 600;
+  color: var(--text);
+  font-size: 11px;
+}
+.bm td,
+.confusion td {
+  font-family: var(--mono);
+}
+.bm td.abn {
+  color: var(--abn);
+  font-weight: 700;
+}
+.confusion td {
+  text-align: center;
+}
+.confusion td.hit {
+  background: var(--accent-soft);
+  font-weight: 700;
+}
+.confusion td.miss {
+  background: var(--abn-bg);
+  color: var(--abn-text);
+  font-weight: 700;
+}
+
+/* predictive maintenance */
+.mini-chart.tall {
+  height: 190px;
+}
+.iso {
+  margin: 2px 0 10px;
+}
+.iso-bar {
+  position: relative;
+  display: flex;
+  height: 16px;
+  border-radius: 2px;
+  overflow: visible;
+}
+.iso-seg {
+  display: grid;
+  place-items: center;
+  font: 700 10px var(--mono);
+  color: var(--text);
+}
+.iso-seg.zA {
+  background: var(--scale-normal);
+}
+.iso-seg.zB {
+  background: var(--scale-bg);
+}
+.iso-seg.zC {
+  background: color-mix(in srgb, var(--p2) 55%, var(--panel));
+}
+.iso-seg.zD {
+  background: color-mix(in srgb, var(--p1) 55%, var(--panel));
+  color: #fff;
+}
+.iso-ptr {
+  position: absolute;
+  top: -5px;
+  width: 0;
+  height: 0;
+  margin-left: -6px;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 9px solid var(--ptr);
+  transition: left 0.3s;
+}
+.iso-ticks {
+  position: relative;
+  height: 14px;
+  font-size: 10px;
+  color: var(--dim);
+}
+.iso-ticks span {
+  position: absolute;
+  transform: translateX(-50%);
+}
+.iso-ticks span:first-child {
+  transform: none;
+}
+.iso-ticks span:last-child {
+  transform: translateX(-100%);
+  white-space: nowrap;
+}
+.econ-inputs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.econ-inputs label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted);
+}
+.cmp.econ th:first-child {
+  max-width: 170px;
+}
+.cmp.econ th i {
+  display: block;
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--dim);
+}
+.econ-bar {
+  height: 5px;
+  margin: 3px 0;
+  background: var(--bar-bg);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.econ-bar div {
+  height: 100%;
+  background: var(--bar-fill);
+}
+.cmp.econ tr.best .econ-bar div {
+  background: var(--accent);
+}
+
 /* ───────────────── bottom ───────────────── */
 .bottom {
   grid-area: bottom;
@@ -1781,7 +2076,7 @@ td.abn {
     display: none;
   }
   .cam-inset {
-    transform: scale(0.85);
+    transform: scale(0.78);
     transform-origin: top right;
   }
   .panel {

@@ -26,12 +26,16 @@ export interface WorkOrder {
 export interface AssetCondition {
   health: number;
   currentResidual: number;
+  rulS: number | null;
   slip: number;
   slipAlarm: boolean;
   sensorSuspect: boolean[];
-  visionAlarm: boolean;
+  /** Camera label behind repeated no-reads, or null. */
+  visionCamera: string | null;
   jamCount: number[];
   tripped: boolean;
+  /** Learned-model anomaly that no rule explains: the asset its top contributor points at. */
+  unexplained: { asset: string; signal: string; share: number } | null;
 }
 
 export class Maintenance {
@@ -46,6 +50,19 @@ export class Maintenance {
     const created: WorkOrder[] = [];
     const add = (o: WorkOrder | null) => o && created.push(o);
 
+    // Predictive: plan the bearing job before the health limit is reached
+    if (this.held('M001-RUL', c.rulS !== null && c.rulS > 0 && c.rulS < 150, now, 4000)) {
+      add(
+        this.raise({
+          key: 'M001-BRG',
+          asset: 'M-001',
+          title: 'Planned bearing replacement (predictive)',
+          reason: `VT-001 trend: RUL ≈ ${Math.round(c.rulS!)} s until vibration reaches ISO 10816 zone D (4.5 mm/s)`,
+          priority: 'Medium',
+          repair: [['bearingWear', 0], ['wearRate', 0]],
+        }),
+      );
+    }
     if (this.held('M001-BRG', c.health < 70, now, 8000)) {
       add(
         this.raise({
@@ -54,7 +71,20 @@ export class Maintenance {
           title: 'Inspect drive-train bearings and gearbox',
           reason: `Current +${c.currentResidual.toFixed(2)} A above model, health ${c.health.toFixed(0)} %`,
           priority: c.health < 45 ? 'High' : 'Medium',
-          repair: [['bearingWear', 0]],
+          repair: [['bearingWear', 0], ['wearRate', 0]],
+        }),
+      );
+    }
+    if (this.held('ANOMALY', c.unexplained !== null, now, 6000)) {
+      const u = c.unexplained!;
+      add(
+        this.raise({
+          key: 'ANOMALY',
+          asset: u.asset,
+          title: `Investigate unexplained deviation at ${u.asset}`,
+          reason: `Learned model only (no rule fired): ${u.signal} drives ${(u.share * 100).toFixed(0)} % of the deviation`,
+          priority: 'Medium',
+          repair: [['guideRub', false]],
         }),
       );
     }
@@ -84,15 +114,15 @@ export class Maintenance {
         );
       }
     });
-    if (this.held('CAM201', c.visionAlarm, now, 3000)) {
+    if (this.held('VISION', c.visionCamera !== null, now, 3000)) {
       add(
         this.raise({
-          key: 'CAM201',
-          asset: 'CAM-201',
+          key: `VISION-${c.visionCamera}`,
+          asset: c.visionCamera!,
           title: 'Clean lens, check ring light and camera cable',
           reason: 'Consecutive no-reads — cartons rejected fail-safe',
           priority: 'Medium',
-          repair: [['cameraFail', false]],
+          repair: [['cameraFail', 'NONE']],
         }),
       );
     }

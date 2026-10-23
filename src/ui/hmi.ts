@@ -4,22 +4,29 @@
 import { PlantLink } from '../bus/link';
 import type { PlantFrame } from '../bus/protocol';
 import { NAMESPACE, TAG_DEFS, formatTag, nodeId } from '../bus/tags';
-import { PackML, TRANSITIONS, type Verdict } from '../plant/model';
-import { MOTOR, SENSOR_IDS, SENSOR_LABEL, THERMAL } from '../plant/params';
+import { PackML, TRANSITIONS } from '../plant/model';
+import { CAMERAS, MOTOR, SENSOR_IDS, SENSOR_LABEL, THERMAL } from '../plant/params';
 import { TwinScene, type GhostEstimate, type TagValues, type ViewName } from '../scene/scene';
 import { AlarmManager, type AlarmDef, type Priority } from '../twin/alarms';
+import { AnomalyDetector } from '../twin/anomaly';
 import { CONTROL_POWER_W, EnergyMeter, GRID_KG_CO2_PER_KWH } from '../twin/energy';
+import { FeatureExtractor } from '../twin/features';
 import { Historian } from '../twin/historian';
 import { Maintenance, type WorkOrder } from '../twin/maintenance';
 import { OeeTracker } from '../twin/oee';
 import { Recorder } from '../twin/recorder';
+import { RulEstimator, type RulEstimate } from '../twin/rul';
+import { VibrationAnalyzer, ZONE_D } from '../twin/vibration';
 import { ShadowModel } from '../twin/shadow';
 import { ControlChart, RULE_TEXT } from '../twin/spc';
 import { ALARMS, Supervisor, fmtDuration } from '../twin/supervisor';
-import { inspect, toDisplayImage } from '../twin/vision';
-import { runScenario, type ScenarioResult } from '../twin/whatif';
-import { FaceplatePopover, type VisionStats } from './faceplate';
+import { runScenario, type Scenario, type ScenarioResult } from '../twin/whatif';
+import { BenchmarkView, OptimiserView } from './analysisViews';
+import { FaceplatePopover } from './faceplate';
 import { LineOverview } from './overview';
+import { PdmView } from './pdmView';
+import { AnomalyPanel } from './predictive';
+import { VisionStation } from './visionStation';
 import { applyTheme, cssVar, loadTheme, type Theme } from './theme';
 import { TrendChart, type Series } from './trends';
 import { $, AnalogIndicator, bindTabs, download, escapeHtml, hhmmss, pct, toast } from './widgets';
@@ -48,6 +55,17 @@ const SPC_ALARMS = {
   quality: { id: 'SPC.QUALITY', tag: 'SPC.RejectRate', text: 'Reject rate out of statistical control', priority: 3 },
 } satisfies Record<string, AlarmDef>;
 
+const ANOMALY_ALARM: AlarmDef = {
+  id: 'TWIN.ANOMALY',
+  tag: 'Twin.LearnedModel',
+  text: 'Learned model: behaviour outside the normal envelope',
+  priority: 2,
+};
+
+/** Rule-based alarms that "explain" a learned-model anomaly. */
+const isRuleDiagnosis = (id: string) =>
+  id === 'BELT.SLIP' || id === 'M001.LOAD' || id.startsWith('JAM.') || (id.startsWith('PE') && id.endsWith('.FAULT')) || id === 'VISION.NOREAD';
+
 export class Hmi {
   private readonly link = new PlantLink();
   private readonly shadow = new ShadowModel();
@@ -60,9 +78,19 @@ export class Hmi {
   private readonly maintenance = new Maintenance();
   private readonly spcDrive = new ControlChart('I', 20);
   private readonly spcQual = new ControlChart('p', 5, 10);
+  private readonly features = new FeatureExtractor();
+  private readonly anomaly = new AnomalyDetector();
+  private readonly vibration = new VibrationAnalyzer();
+  /** Bearing RUL: overall vibration velocity rising towards ISO 10816 zone D. */
+  private readonly rul = new RulEstimator({ threshold: ZONE_D, rising: true, minDelta: 0.3, minSlopePerS: 0.1 / 60 });
+  private rulEst: RulEstimate | null = null;
   private readonly scene: TwinScene;
   private readonly overview: LineOverview;
   private readonly faceplate: FaceplatePopover;
+  private readonly visionStation: VisionStation;
+  private readonly anomalyPanel: AnomalyPanel;
+  private readonly pdm: PdmView;
+  private readonly optimiserView: OptimiserView;
 
   private readonly ind: Record<'speed' | 'current' | 'temp' | 'power', AnalogIndicator>;
   private readonly trends: { drive: TrendChart; motor: TrendChart; twin: TrendChart };
@@ -79,8 +107,6 @@ export class Hmi {
   private showTwin = true;
 
   private lastRequest = 0;
-  private lastVerdict: Verdict | null = null;
-  private readonly vision: VisionStats = { inspected: 0, defects: 0, noReads: 0, msSum: 0 };
   private driveAcc = { sum: 0, n: 0, start: 0 };
   private qualAcc = { defects: 0, n: 0 };
   private pusherPrev = false;
@@ -96,16 +122,34 @@ export class Hmi {
     this.scene = new TwinScene($('three'));
     this.scene.onPick = (id) => this.select(id);
     this.overview = new LineOverview($<HTMLCanvasElement>('overview'));
+    this.visionStation = new VisionStation(this.scene, (cam, on) =>
+      this.alarms.log('TWIN', 'Vision', `${CAMERAS.find((c) => c.id === cam)!.label} ${on ? 'included in' : 'excluded from'} the decision`),
+    );
     this.faceplate = new FaceplatePopover(
       {
         tag: (p) => this.viewFrame()?.tags[p],
         shadow: this.shadow,
-        vision: this.vision,
+        vision: this.visionStation.stats,
+        camerasEnabled: this.visionStation.enabled,
         maintenance: this.maintenance,
         raiseWorkOrder: (asset) => this.raiseManualOrder(asset),
       },
       () => this.select(null),
     );
+    this.anomalyPanel = new AnomalyPanel(this.anomaly, () => {
+      this.anomaly.retrain();
+      this.alarms.log('TWIN', 'Learned model', 'Re-learning normal behaviour');
+    });
+    this.pdm = new PdmView(this.vibration, this.rul);
+    this.optimiserView = new OptimiserView(
+      () => this.scenarioBase(),
+      () => Number(this.link.tag('Drive.SpeedSetpoint') ?? 0.3),
+      (v) => this.applySpeed(v),
+    );
+    new BenchmarkView((rep) => {
+      const wear = rep.rows.find((r) => r.fault === 'wear');
+      if (wear) this.pdm.setDetectionRate(wear.ruleDetected / wear.runs);
+    });
 
     const drive = $('driveIndicators');
     this.ind = {
@@ -181,6 +225,18 @@ export class Hmi {
       this.driveAcc = { sum: 0, n: 0, start: f.ts };
     }
 
+    // Condition monitoring (VT-001), prognostics and the learned (data-driven) anomaly model
+    if (f.vibration) {
+      this.vibration.update(f.ts, f.vibration);
+      this.rul.update(f.ts, this.vibration.vRms, steady);
+    }
+    const x = this.features.update(f, this.shadow);
+    if (x) {
+      const r = this.anomaly.add(f.ts, x, Number(t['Drive.SpeedSetpoint']));
+      const top = r?.contributions[0];
+      this.alarms.set(ANOMALY_ALARM, this.anomaly.status === 'ANOMALY', top ? `${top.name} ${(top.share * 100).toFixed(0)} %` : '');
+    }
+
     if (f.ts - this.lastSample >= 200) {
       this.lastSample = f.ts;
       this.hist.sample(f.ts, {
@@ -202,7 +258,7 @@ export class Hmi {
     if (req > 0 && req !== this.lastRequest) {
       this.lastRequest = req;
       this.scene.update(f, 0, this.shadow.tracks);
-      this.runInspection(req, !t['Simulation.CameraFail']);
+      this.runInspection(req, String(t['Simulation.CameraFail']));
     }
   }
 
@@ -250,6 +306,7 @@ export class Hmi {
     setInterval(() => {
       this.updateTrends();
       this.updateSpc();
+      this.renderSlow();
     }, 500);
     setInterval(() => {
       this.supervisor.checkLink();
@@ -260,21 +317,16 @@ export class Hmi {
     }, 1000);
   }
 
-  private runInspection(tid: number, cameraOk: boolean): void {
-    const { w, h } = this.scene.inspectionSize;
-    const img = toDisplayImage(this.scene.captureInspection(cameraOk), w, h);
-    const r = inspect(img);
+  private runInspection(tid: number, failedCamera: string): void {
+    const r = this.visionStation.inspect(failedCamera);
     void this.link.call('ReportInspection', tid, r.verdict);
 
-    this.lastVerdict = r.verdict;
-    this.vision.inspected++;
-    this.vision.msSum += r.ms;
-    if (r.verdict === 'DEFECT') this.vision.defects++;
-    if (r.verdict === 'NO_READ') this.vision.noReads++;
-    this.supervisor.visionNoReads = r.verdict === 'NO_READ' ? this.supervisor.visionNoReads + 1 : 0;
+    const noRead = r.verdict === 'NO_READ';
+    this.supervisor.visionNoReads = noRead ? this.supervisor.visionNoReads + 1 : 0;
+    this.supervisor.visionNoReadCamera = noRead && r.cause ? CAMERAS.find((c) => c.id === r.cause!.camera)!.label : '';
 
     // p-chart subgroup (no-reads carry no quality information)
-    if (r.verdict !== 'NO_READ') {
+    if (!noRead) {
       this.qualAcc.n++;
       if (r.verdict === 'DEFECT') this.qualAcc.defects++;
       if (this.qualAcc.n === this.spcQual.subgroupSize) {
@@ -282,26 +334,6 @@ export class Hmi {
         this.qualAcc = { defects: 0, n: 0 };
       }
     }
-
-    const ctx = $<HTMLCanvasElement>('camCanvas').getContext('2d')!;
-    ctx.putImageData(img, 0, 0);
-    if (r.bbox) {
-      const [x0, y0, x1, y1] = r.bbox;
-      ctx.strokeStyle = r.verdict === 'DEFECT' ? '#ff5a4a' : '#7fd1ff';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(x0 - 1.5, y0 - 1.5, x1 - x0 + 3, y1 - y0 + 3);
-    }
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(0, 0, 160, 13);
-    ctx.fillStyle = '#e6e9ec';
-    ctx.font = '9px Consolas, monospace';
-    ctx.fillText(`T${tid}  obj ${(r.objectRatio * 100).toFixed(0)}%  red ${(r.defectRatio * 100).toFixed(1)}%`, 3, 9);
-
-    const v = $('camVerdict');
-    v.textContent = `${r.verdict}${r.verdict !== 'NO_READ' ? ` ${(r.confidence * 100).toFixed(0)}%` : ''}`;
-    v.className = `verdict v-${r.verdict.toLowerCase()}`;
-    $('camMs').textContent = `${r.ms.toFixed(1)} ms`;
-    $('camStats').textContent = `${this.vision.inspected} inspected · ${this.vision.defects} defect`;
   }
 
   // ───────────────────────────── commands & controls ─────────────────────────────
@@ -361,6 +393,7 @@ export class Hmi {
     bindTabs((tab) => {
       if (ALARM_TABS.has(tab)) this.journalVisible = tab === 'journal';
       this.alarmVersion = -1;
+      this.refreshVisible();
     });
 
     // Trends
@@ -400,13 +433,7 @@ export class Hmi {
     const wiSpeed = $<HTMLInputElement>('wiSpeed');
     wiSpeed.addEventListener('input', () => ($('wiSpeedVal').textContent = `${Number(wiSpeed.value).toFixed(2)} m/s`));
     $('wiRun').addEventListener('click', () => this.runWhatIf());
-    $('wiApply').addEventListener('click', () => {
-      if (!this.whatIfResult) return;
-      const v = this.whatIfResult.prop.speed;
-      void this.command('SetSpeed', v);
-      $<HTMLInputElement>('spInput').value = v.toFixed(2);
-      $<HTMLInputElement>('spRange').value = String(v);
-    });
+    $('wiApply').addEventListener('click', () => this.whatIfResult && this.applySpeed(this.whatIfResult.prop.speed));
 
     // Maintenance
     $('woList').addEventListener('click', (e) => {
@@ -426,6 +453,7 @@ export class Hmi {
     };
     slider('fSlip', 'slip', 100, (v) => `${v} %`);
     slider('fWear', 'bearingWear', 100, (v) => `${v} %`);
+    slider('fWearRate', 'wearRate', 6000, (v) => `${v} %/min`);
     slider('fDefect', 'defectRate', 100, (v) => `${v} %`);
     $<HTMLSelectElement>('fSensor').addEventListener('change', (e) => {
       const v = (e.target as HTMLSelectElement).value;
@@ -437,14 +465,29 @@ export class Hmi {
       void this.link.call('SetFault', 'jam', on);
       this.alarms.log('EVENT', 'Simulation', on ? 'Obstruction placed in zone 2' : 'Obstruction removed from zone 2');
     });
-    $('fCam').addEventListener('click', () => {
-      const on = !this.link.tag('Simulation.CameraFail');
-      void this.link.call('SetFault', 'cameraFail', on);
-      this.alarms.log('EVENT', 'Simulation', on ? 'CAM-201 failed' : 'CAM-201 restored');
+    $<HTMLSelectElement>('fCam').addEventListener('change', (e) => {
+      const v = (e.target as HTMLSelectElement).value;
+      void this.link.call('SetFault', 'cameraFail', v);
+      this.alarms.log('EVENT', 'Simulation', v === 'NONE' ? 'All cameras restored' : `${v} failed (black image)`);
+    });
+    $('fRub').addEventListener('click', () => {
+      const on = !this.link.tag('Simulation.GuideRub');
+      void this.link.call('SetFault', 'guideRub', on);
+      this.alarms.log('EVENT', 'Simulation', on ? 'Zone-3 side guide misaligned (unmodelled fault)' : 'Zone-3 side guide realigned');
     });
     $('fEstop').addEventListener('click', () => void this.link.call('SetEStop', !this.link.tag('Safety.ES001')));
     $('fReset').addEventListener('click', () => {
-      for (const [k, v] of [['slip', 0], ['bearingWear', 0], ['defectRate', 0.12], ['sensorFail', 'NONE'], ['jam', false], ['cameraFail', false]] as const) {
+      const all = [
+        ['slip', 0],
+        ['bearingWear', 0],
+        ['wearRate', 0],
+        ['defectRate', 0.12],
+        ['sensorFail', 'NONE'],
+        ['jam', false],
+        ['cameraFail', 'NONE'],
+        ['guideRub', false],
+      ] as const;
+      for (const [k, v] of all) {
         void this.link.call('SetFault', k, v);
         this.syncSimControl(k, v);
       }
@@ -462,14 +505,21 @@ export class Hmi {
 
   /** Mirrors a fault value back into the simulation drawer controls. */
   private syncSimControl(fault: string, value: unknown): void {
-    const map: Record<string, [string, number]> = { slip: ['fSlip', 100], bearingWear: ['fWear', 100], defectRate: ['fDefect', 100] };
+    const map: Record<string, [string, number, string]> = {
+      slip: ['fSlip', 100, '%'],
+      bearingWear: ['fWear', 100, '%'],
+      wearRate: ['fWearRate', 6000, '%/min'],
+      defectRate: ['fDefect', 100, '%'],
+    };
     if (map[fault]) {
-      const [id, scale] = map[fault];
+      const [id, scale, unit] = map[fault];
       const v = Math.round(Number(value) * scale);
       $<HTMLInputElement>(id).value = String(v);
-      $(`${id}Val`).textContent = `${v} %`;
+      $(`${id}Val`).textContent = `${v} ${unit}`;
     } else if (fault === 'sensorFail') {
       $<HTMLSelectElement>('fSensor').value = String(value);
+    } else if (fault === 'cameraFail') {
+      $<HTMLSelectElement>('fCam').value = String(value);
     }
   }
 
@@ -479,6 +529,9 @@ export class Hmi {
     this.scene.setTheme(this.sceneColors());
     this.overview.refreshTheme();
     for (const c of [...Object.values(this.trends), this.energyChart, ...Object.values(this.spcCharts), this.wiChart]) c?.refreshTheme();
+    this.anomalyPanel.refreshTheme();
+    this.pdm.refreshTheme();
+    this.optimiserView.refreshTheme();
     this.updateTrends();
     this.updateSpc();
   }
@@ -592,7 +645,6 @@ export class Hmi {
     const t = f.tags;
     const state = Number(t['Status.State']);
     const stateName = String(t['Status.StateName']);
-    const sh = this.shadow;
 
     // Header
     $('stateName').textContent =
@@ -632,7 +684,38 @@ export class Hmi {
       ['First-pass yield', total ? pct(Number(t['Counters.Outfeed']) / total) : '—'],
     ]);
 
-    // Twin health
+    if (this.visible('twin')) this.renderHealth(f);
+    if (this.visible('prod')) this.renderProduction(o);
+    if (this.visible('tags')) for (const [path, cell] of this.tagCells) cell.textContent = formatTag(path, t[path]);
+    if (!$('simDrawer').hidden) this.renderSimulation(t);
+    this.updateAlarms();
+  }
+
+  /** True when a tab pane is on screen — hidden panes are not re-rendered. */
+  private visible(pane: string): boolean {
+    return document.querySelector(`.tab-pane.on[data-pane="${pane}"]`) !== null;
+  }
+
+  /** 2 Hz panels. The RUL estimate is always computed (maintenance needs it); drawing only when visible. */
+  private renderSlow(): void {
+    if (this.visible('twin')) this.anomalyPanel.render();
+    this.rulEst = this.pdm.render(this.visible('pdm'));
+    if (this.visible('vision')) this.visionStation.render();
+  }
+
+  /** Immediate refresh after a tab switch, so a pane never shows stale content. */
+  private refreshVisible(): void {
+    if (this.link.frame) this.updatePanels(this.link.frame);
+    this.updateTrends();
+    this.updateSpc();
+    this.renderSlow();
+    this.renderMaintenance(false);
+  }
+
+  private renderHealth(f: PlantFrame): void {
+    const t = f.tags;
+    const state = Number(t['Status.State']);
+    const sh = this.shadow;
     $('mSlip').textContent = pct(Math.max(0, sh.slip));
     $('mSlip').classList.toggle('abn', this.alarms.isActive('BELT.SLIP'));
     $('mBeltEst').textContent = `${sh.beltSpeedEst.toFixed(3)} m/s`;
@@ -678,8 +761,9 @@ export class Hmi {
     }
 
     $('diagList').innerHTML = this.diagnostics(f).map((d) => `<li class="${d.abn ? 'abn' : ''}">${escapeHtml(d.text)}</li>`).join('');
+  }
 
-    // Production: OEE
+  private renderProduction(o: ReturnType<OeeTracker['snapshot']>): void {
     $('oeeVal').textContent = o.planned > 0 ? pct(o.oee) : '—';
     $('shiftInfo').textContent = `shift ${this.oee.shiftNo} · since ${hhmmss(this.oee.shiftStart)}`;
     $('apq').innerHTML = (
@@ -714,27 +798,24 @@ export class Hmi {
     $('eNote').textContent =
       `Drive ${e.driveWh.toFixed(2)} Wh + control circuit ${e.controlWh.toFixed(2)} Wh (${CONTROL_POWER_W} W, always on).` +
       (co2 !== null ? ` ≈ ${co2.toFixed(1)} g CO₂e per 1000 good cartons at ${GRID_KG_CO2_PER_KWH} kg/kWh.` : '');
+  }
 
-    // Address space
-    for (const [path, cell] of this.tagCells) cell.textContent = formatTag(path, t[path]);
-
-    // Simulation drawer
+  private renderSimulation(t: PlantFrame['tags']): void {
     $('fJam').classList.toggle('on', Boolean(t['Simulation.Jam']));
     $('fJam').textContent = t['Simulation.Jam'] ? 'Remove obstruction' : 'Obstruct zone 2';
-    $('fCam').classList.toggle('on', Boolean(t['Simulation.CameraFail']));
-    $('fCam').textContent = t['Simulation.CameraFail'] ? 'Restore camera' : 'Camera failure';
+    $('fRub').classList.toggle('on', Boolean(t['Simulation.GuideRub']));
+    $('fRub').textContent = t['Simulation.GuideRub'] ? 'Realign zone-3 guide' : 'Misalign zone-3 guide';
     $('fEstop').classList.toggle('on', Boolean(t['Safety.ES001']));
     $('fEstop').textContent = t['Safety.ES001'] ? 'Release E-stop ES-001' : 'Press E-stop ES-001';
     $('truthKv').innerHTML = kv([
       ['True belt speed', `${Number(t['Simulation.BeltSpeedTrue']).toFixed(3)} m/s`],
       ['Actual slip', pct(Number(t['Simulation.Slip']))],
       ['Actual bearing wear', pct(Number(t['Simulation.BearingWear']), 0)],
+      ['Zone-3 guide rub', t['Simulation.GuideRub'] ? 'YES' : 'no'],
       ['Defects escaped to outfeed', String(t['Simulation.EscapedDefects'])],
       ['Good cartons rejected', String(t['Simulation.FalseRejects'])],
       ['Simulation time', fmtDuration(Number(t['Simulation.SimTime']))],
     ]);
-
-    this.updateAlarms();
   }
 
   /** Live values on the 3D device tags (follows replay). */
@@ -751,8 +832,8 @@ export class Hmi {
         abn: temp >= THERMAL.highAlarm || this.alarms.isActive('M001.LOAD'),
       },
       ENC001: { text: `${Number(t['Drive.SpeedActual']).toFixed(3)} m/s` },
+      VT001: { text: `${this.vibration.vRms.toFixed(2)} mm/s · ${this.vibration.zone.zone}`, abn: this.vibration.zone.zone >= 'C' },
       BELT: { text: `slip ${pct(Math.max(0, this.shadow.slip), 0)}`, abn: this.alarms.isActive('BELT.SLIP') },
-      CAM201: { text: this.lastVerdict ?? '—', abn: this.lastVerdict === 'NO_READ' },
       YV301: { text: `${t['Counters.Rejected']} rej` },
       HL001: {
         text: t['Actuators.HL001_Red'] ? 'RED' : t['Actuators.HL001_Amber'] ? 'AMBER' : t['Actuators.HL001_Green'] ? 'GREEN' : '—',
@@ -763,6 +844,8 @@ export class Hmi {
     SENSOR_IDS.forEach((id, k) => {
       values[id] = { text: t[`Sensors.${id}`] ? 'ON' : 'OFF', abn: suspect[k] || this.shadow.blocked[k] };
     });
+    const fused = this.visionStation.stats.last?.verdict;
+    values.CAM201 = { text: fused ? `tunnel ${fused === 'NO_READ' ? 'NO READ' : fused}` : '5 cams', abn: fused === 'NO_READ' || fused === 'DEFECT' };
     this.scene.setTagValues(values);
   }
 
@@ -783,6 +866,13 @@ export class Hmi {
       out.push({ text: `Encoder reports ${v.toFixed(3)} m/s but cartons travel at ${sh.beltSpeedEst.toFixed(3)} m/s → slip ${pct(sh.slip)}.`, abn: true });
     }
     if (sh.currentResidual > 0.3) out.push({ text: `Motor draws ${sh.currentResidual.toFixed(2)} A more than the model predicts for this speed and load.`, abn: true });
+    const u = this.unexplainedAnomaly();
+    if (u) {
+      out.push({
+        text: `Unknown fault: only the learned model sees it — ${u.signal} drives ${(u.share * 100).toFixed(0)} % of the deviation (check ${u.asset}).`,
+        abn: true,
+      });
+    }
     if (!out.length) out.push({ text: 'All zones nominal — every carton accounted for, residuals inside limits.', abn: false });
     for (const n of sh.notes.slice(0, 3)) out.push({ text: n, abn: false });
     return out;
@@ -845,13 +935,18 @@ export class Hmi {
     this.trends.drive.setData([t, sp, v, vEst]);
     this.trends.motor.setData([t, i, iModel, temp]);
     this.trends.twin.setData([t, slip, ires]);
-    this.energyChart.setData([t, power]);
+    if (this.visible('prod')) this.energyChart.setData([t, power]);
   }
 
   // ───────────────────────────── SPC ─────────────────────────────
 
   private updateSpc(): void {
+    const draw = this.visible('spc');
     const render = (chart: ControlChart, plot: TrendChart, statusId: string, limitsId: string, unit: string, d: number, def: AlarmDef) => {
+      const status = chart.status;
+      const sig = chart.lastSignal;
+      this.alarms.set(def, status === 'OUT OF CONTROL', sig ? `${sig.rule}: ${RULE_TEXT[sig.rule!]}` : '');
+      if (!draw) return;
       const s = chart.samples;
       const L = chart.limits;
       const line = (v: number | undefined): Series => s.map(() => (v === undefined ? null : v));
@@ -863,8 +958,6 @@ export class Hmi {
         line(L?.lcl),
         s.map((x) => (x.rule ? x.value : null)),
       ]);
-      const status = chart.status;
-      const sig = chart.lastSignal;
       $(statusId).innerHTML =
         status === 'COLLECTING'
           ? `<span class="spc-chip collect">COLLECTING BASELINE ${chart.collected}/${chart.baselineSize}</span><span class="muted">limits are computed from the first ${chart.baselineSize} samples</span>`
@@ -873,7 +966,6 @@ export class Hmi {
       $(limitsId).textContent = L
         ? `CL ${L.centre.toFixed(d)} · UCL ${L.ucl.toFixed(d)} · LCL ${L.lcl.toFixed(d)} · σ ${L.sigma.toFixed(d)} ${unit}`
         : '';
-      this.alarms.set(def, status === 'OUT OF CONTROL', sig ? `${sig.rule}: ${RULE_TEXT[sig.rule!]}` : '');
     };
     render(this.spcDrive, this.spcCharts.drive, 'spcDriveStatus', 'spcDriveLimits', 'A', 3, SPC_ALARMS.drive);
     render(this.spcQual, this.spcCharts.qual, 'spcQualStatus', 'spcQualLimits', '', 3, SPC_ALARMS.quality);
@@ -881,18 +973,28 @@ export class Hmi {
 
   // ───────────────────────────── maintenance ─────────────────────────────
 
+  /** A learned-model anomaly that none of the rule-based diagnoses explains. */
+  private unexplainedAnomaly(): { asset: string; signal: string; share: number } | null {
+    const top = this.anomaly.last?.contributions[0];
+    if (this.anomaly.status !== 'ANOMALY' || !top) return null;
+    for (const a of this.alarms.alarms.values()) if (a.state !== 'RTN_UNACK' && isRuleDiagnosis(a.id)) return null;
+    return { asset: top.asset, signal: top.name, share: top.share };
+  }
+
   private evaluateMaintenance(): void {
     const sh = this.shadow;
     const created = this.maintenance.evaluate(
       {
         health: sh.health,
         currentResidual: sh.currentResidual,
+        rulS: this.rulEst?.rulS ?? null,
         slip: sh.slip,
         slipAlarm: this.alarms.isActive(ALARMS.slip.id),
         sensorSuspect: sh.sensorSuspect,
-        visionAlarm: this.alarms.isActive(ALARMS.vision.id),
+        visionCamera: this.alarms.isActive(ALARMS.vision.id) ? this.supervisor.visionNoReadCamera || 'CAM-201' : null,
         jamCount: this.supervisor.jamCount,
         tripped: this.alarms.isActive(ALARMS.trip.id),
+        unexplained: this.unexplainedAnomaly(),
       },
       Date.now(),
     );
@@ -931,8 +1033,10 @@ export class Hmi {
       const zone = /^ZONE(\d)-JAM$/.exec(o.key);
       if (zone) this.supervisor.jamCount[Number(zone[1])] = 0;
       if (o.asset === 'M-001') {
-        // The process changed (repair) — establish new limits from post-repair data
+        // The process changed (repair) — establish new limits and a new degradation trend
         this.spcDrive.rebaseline();
+        this.rul.reset();
+        this.vibration.reset();
         this.alarms.log('TWIN', 'SPC', `Drive-current limits re-baselined after ${o.id}`);
       }
       const repair = o.repair.map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join(', ');
@@ -948,6 +1052,7 @@ export class Hmi {
     const sh = this.shadow;
     const active = m.openCount + m.inProgressCount;
     $('woCount').textContent = active ? String(active) : '';
+    if (!this.visible('maint')) return;
     $('woKpis').innerHTML = [
       ['Open', String(m.openCount)],
       ['In progress', String(m.inProgressCount)],
@@ -957,13 +1062,22 @@ export class Hmi {
       .map(([k, v]) => `<div class="metric"><span>${k}</span><b>${v}</b></div>`)
       .join('');
 
-    const visionBad = this.alarms.isActive(ALARMS.vision.id);
+    const rul = this.rulEst?.rulS;
     const assets: [string, string, string, boolean][] = [
-      ['M-001', 'Drive gearmotor', `${sh.health.toFixed(0)} % health`, sh.health < 70],
+      [
+        'M-001',
+        'Drive gearmotor',
+        `${sh.health.toFixed(0)} % · ISO ${this.vibration.zone.zone}${rul !== null && rul !== undefined ? ` · RUL ${fmtDuration(rul)}` : ''}`,
+        sh.health < 70 || this.vibration.zone.zone >= 'C' || (rul !== null && rul !== undefined && rul < 150),
+      ],
       ['BELT', 'Conveyor belt', `${pct(Math.max(0, sh.slip), 0)} slip`, this.alarms.isActive(ALARMS.slip.id)],
       ...SENSOR_IDS.map((id, k): [string, string, string, boolean] => [SENSOR_LABEL[id], 'Photo-eye', sh.sensorSuspect[k] ? 'Suspect' : 'OK', sh.sensorSuspect[k]]),
       ['ENC-001', 'Encoder', 'OK', false],
-      ['CAM-201', 'Inspection camera', visionBad ? 'No-read' : 'OK', visionBad],
+      ...CAMERAS.map((c): [string, string, string, boolean] => {
+        const st = this.visionStation.stats.perCam[c.id];
+        const bad = st.last === 'NO_READ';
+        return [c.label, `Camera · ${c.face}`, bad ? 'No-read' : `${st.defects} defects`, bad];
+      }),
       ['YV-301', 'Pusher valve', `${m.pusherCycles} cycles`, false],
     ];
     $('assetTable').innerHTML =
@@ -1010,21 +1124,32 @@ export class Hmi {
 
   // ───────────────────────────── what-if ─────────────────────────────
 
-  private runWhatIf(): void {
+  /** Initial condition for model runs — from the twin's own estimates (residuals), not simulator ground truth. */
+  private scenarioBase(): Omit<Scenario, 'speed'> | null {
     const t = this.link.frame?.tags;
-    if (!t) return;
-    const proposed = Number($<HTMLInputElement>('wiSpeed').value);
-    const current = Number(t['Drive.SpeedSetpoint']);
-    const horizon = Number($<HTMLSelectElement>('wiHorizon').value);
+    if (!t) return null;
     const fromState = $<HTMLInputElement>('wiState').checked;
-    // Initial condition comes from the twin's own estimates (residuals), not simulator ground truth.
-    const base = {
-      horizonMin: horizon,
+    return {
+      horizonMin: Number($<HTMLSelectElement>('wiHorizon').value),
       temperature: fromState ? Number(t['Drive.MotorTemp']) : THERMAL.initial,
       wear: fromState ? Math.min(1, Math.max(0, this.shadow.currentResidual) / ((5 * MOTOR.Tc) / MOTOR.Kt)) : 0,
       slip: fromState ? Math.max(0, this.shadow.slip) : 0,
       defectRate: Number(t['Simulation.DefectRate']),
     };
+  }
+
+  private applySpeed(v: number): void {
+    void this.command('SetSpeed', v);
+    $<HTMLInputElement>('spInput').value = v.toFixed(2);
+    $<HTMLInputElement>('spRange').value = String(v);
+  }
+
+  private runWhatIf(): void {
+    const base = this.scenarioBase();
+    if (!base) return;
+    const proposed = Number($<HTMLInputElement>('wiSpeed').value);
+    const current = Number(this.link.tag('Drive.SpeedSetpoint'));
+    const horizon = base.horizonMin;
     const btn = $<HTMLButtonElement>('wiRun');
     btn.disabled = true;
     $('wiStatus').textContent = `Simulating 2 × ${horizon} min of plant time…`;
@@ -1105,6 +1230,12 @@ export class Hmi {
       `Motor temperature,${t['Drive.MotorTemp']} °C`,
       `SPC drive current,${this.spcDrive.status}`,
       `SPC reject rate,${this.spcQual.status}`,
+      `Learned anomaly model,${this.anomaly.status}`,
+      `Drive-train RUL [s],${this.rulEst?.rulS?.toFixed(0) ?? 'no trend'}`,
+      `Cartons inspected (5 cameras),${this.visionStation.stats.inspected}`,
+      `Rejected as defect,${this.visionStation.stats.defects}`,
+      `Defects missed by top camera alone,${this.visionStation.stats.missedByTop}`,
+      `Fail-safe no-reads,${this.visionStation.stats.noReads}`,
       '',
       'State,Duration [s]',
       ...o.stateTimes.map(([s, x]) => `${s},${x.toFixed(1)}`),

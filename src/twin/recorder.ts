@@ -27,7 +27,7 @@ export class Recorder {
     this.last = f.ts;
     this.snapshots.push({
       ts: f.ts,
-      frame: { ...f, events: [] },
+      frame: { ...f, events: [], vibration: undefined },
       ghosts: ghosts.map(({ id, x, overdue }) => ({ id, x, overdue })),
       jamZones: [...jamZones],
       sensorSuspect: [...sensorSuspect],

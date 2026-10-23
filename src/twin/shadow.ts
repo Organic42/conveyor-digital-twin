@@ -48,6 +48,8 @@ export class ShadowModel {
   health = 100;
   thermal: ThermalForecast = { steadyState: THERMAL.ambient, toHighAlarm: null, toTrip: null };
 
+  /** Measured encoder travel per metre of zone length for cartons crossing zone k (1 = nominal). */
+  zoneRatio = [1, 1, 1, 1];
   sensorSuspect = [false, false, false, false];
   blocked = [false, false, false, false]; // accumulation in front of a photo-eye
   overdueInZone = [0, 0, 0, 0]; // zone k lies between PE[k-1] and PE[k]
@@ -156,7 +158,10 @@ export class ShadowModel {
       if (tr.clean) {
         const dEnc = d - tr.encAtK;
         const inst = dEnc > 0.05 ? 1 - (SX[k] - SX[k - 1]) / dEnc : NaN;
-        if (inst > -0.1 && inst < 0.45) this.slip += (inst - this.slip) * 0.35; // reject outliers
+        if (inst > -0.1 && inst < 0.45) {
+          this.slip += (inst - this.slip) * 0.35; // reject outliers
+          this.zoneRatio[k] += (dEnc / (SX[k] - SX[k - 1]) - this.zoneRatio[k]) * 0.3;
+        }
 
       }
     } else if (k >= 2) {

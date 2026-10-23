@@ -1,24 +1,19 @@
 /** Device faceplate shown as a popover anchored to the selected device in the 3D view. */
 import { TAG_BY_PATH, formatTag } from '../bus/tags';
 import type { TagValue } from '../plant/model';
-import { DRIVE, SENSOR_IDS, SENSOR_LABEL, SENSOR_X, type SensorId } from '../plant/params';
+import { CAMERAS, DRIVE, SENSOR_IDS, SENSOR_LABEL, SENSOR_X, type CameraId, type SensorId } from '../plant/params';
 import type { DeviceId } from '../scene/scene';
 import type { Maintenance } from '../twin/maintenance';
 import type { ShadowModel } from '../twin/shadow';
+import type { VisionStats } from './visionStation';
 import { $, escapeHtml, pct } from './widgets';
-
-export interface VisionStats {
-  inspected: number;
-  defects: number;
-  noReads: number;
-  msSum: number;
-}
 
 export interface FaceplateContext {
   /** Tag value of the frame currently on screen (live or replay). */
   tag(path: string): TagValue | undefined;
   shadow: ShadowModel;
   vision: VisionStats;
+  camerasEnabled: ReadonlySet<CameraId>;
   maintenance: Maintenance;
   raiseWorkOrder(asset: string): void;
 }
@@ -110,6 +105,24 @@ function deviceInfo(id: DeviceId, ctx: FaceplateContext): DeviceInfo {
   const sh = ctx.shadow;
   const v = ctx.vision;
 
+  const cam = CAMERAS.find((c) => c.id === id);
+  if (cam) {
+    const st = v.perCam[cam.id];
+    return {
+      title: `${cam.label} · ${cam.view} camera`,
+      asset: cam.label,
+      kind: 'Area-scan · ring light · triggered by PE-201 with the other 4',
+      rows: [
+        ['Carton face', () => cam.face],
+        ['Used in decision', () => (ctx.camerasEnabled.has(cam.id) ? 'yes' : 'no (excluded)')],
+        ['Last view', () => st.last ?? '—'],
+        ['Defects found', () => String(st.defects)],
+        ['No-reads', () => String(st.noReads)],
+        ['Tunnel avg. processing', () => (v.inspected ? `${(v.msSum / v.inspected).toFixed(1)} ms / 5 views` : '—')],
+      ],
+    };
+  }
+
   if ((SENSOR_IDS as readonly string[]).includes(id)) {
     const sid = id as SensorId;
     const k = SENSOR_IDS.indexOf(sid);
@@ -140,6 +153,18 @@ function deviceInfo(id: DeviceId, ctx: FaceplateContext): DeviceInfo {
           ['Health index', () => `${sh.health.toFixed(0)} %`],
         ],
       };
+    case 'VT001':
+      return {
+        title: 'VT-001 · Vibration sensor',
+        asset: 'M-001',
+        kind: 'IEPE accelerometer · 2.56 kHz · 1024-sample block per second',
+        rows: [
+          ['Overall acceleration', tag('Vibration.AccelRms')],
+          ['Shaft speed', tag('Drive.MotorSpeed')],
+          ['Bearing', () => '6204 · 8 balls · drive end'],
+        ],
+        note: 'Velocity RMS, ISO 10816 zone, spectrum and RUL are in the PdM tab.',
+      };
     case 'ENC001':
       return {
         title: 'ENC-001 · Drive roller encoder',
@@ -151,19 +176,6 @@ function deviceInfo(id: DeviceId, ctx: FaceplateContext): DeviceInfo {
           ['Twin slip estimate', () => pct(Math.max(0, sh.slip))],
         ],
         note: 'Measures the drive roller, not the belt — slip is only visible to the twin through carton transit times.',
-      };
-    case 'CAM201':
-      return {
-        title: 'CAM-201 · Inspection camera',
-        asset: 'CAM-201',
-        kind: 'Area-scan · ring light · triggered by PE-201',
-        rows: [
-          ['Last request', tag('Inspection.RequestId')],
-          ['Inspected', () => String(v.inspected)],
-          ['Defects found', () => String(v.defects)],
-          ['No-reads', () => String(v.noReads)],
-          ['Avg. processing', () => (v.inspected ? `${(v.msSum / v.inspected).toFixed(2)} ms` : '—')],
-        ],
       };
     case 'YV301':
       return {

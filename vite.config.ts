@@ -6,5 +6,15 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 export default defineConfig({
   plugins: [viteSingleFile()],
   worker: { format: 'iife' },
-  build: { target: 'es2020', chunkSizeWarningLimit: 2500 },
+  build: {
+    target: 'es2020',
+    minify: 'terser',
+    terserOptions: {
+      compress: { passes: 2, pure_getters: true, unsafe_arrows: true },
+      format: { comments: false },
+    },
+    cssMinify: true,
+    reportCompressedSize: true,
+    chunkSizeWarningLimit: 2500,
+  },
 });

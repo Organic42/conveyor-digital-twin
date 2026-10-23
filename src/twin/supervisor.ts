@@ -5,7 +5,7 @@
 import { SENSOR_IDS, SENSOR_LABEL, THERMAL } from '../plant/params';
 import { PackML } from '../plant/model';
 import type { PlantFrame } from '../bus/protocol';
-import type { PlantLink } from '../bus/link';
+import type { CallResult } from '../plant/model';
 import type { AlarmDef, AlarmManager } from './alarms';
 import type { ShadowModel } from './shadow';
 
@@ -19,8 +19,15 @@ export const ALARMS = {
   slip: { id: 'BELT.SLIP', tag: 'Twin.Slip', text: 'Belt slip — transit time disagrees with encoder', priority: 2 },
   load: { id: 'M001.LOAD', tag: 'Twin.CurrentResidual', text: 'Drive-train load above model — friction / bearing wear', priority: 2 },
   forecast: { id: 'M001.FORECAST', tag: 'Twin.Thermal', text: 'Over-temperature trip forecast', priority: 3 },
-  vision: { id: 'CAM201.NOREAD', tag: 'CAM-201', text: 'Vision no-read — cartons rejected fail-safe', priority: 3 },
+  vision: { id: 'VISION.NOREAD', tag: 'Vision tunnel', text: 'Vision no-read — cartons rejected fail-safe', priority: 3 },
 } satisfies Record<string, AlarmDef>;
+
+/** What the supervisor needs from the plant link (the live link, or a headless plant in the benchmark). */
+export interface PlantCommands {
+  call(method: string, ...args: unknown[]): Promise<CallResult>;
+  readonly connected: boolean;
+  readonly frame: unknown;
+}
 
 const jamAlarm = (zone: number): AlarmDef => ({
   id: `JAM.Z${zone}`,
@@ -39,6 +46,7 @@ const sensorAlarm = (k: number): AlarmDef => ({
 export class Supervisor {
   autoProtect = true;
   visionNoReads = 0;
+  visionNoReadCamera = '';
   private slipLatched = false;
   private loadSince: number | null = null;
   private loadLatched = false;
@@ -49,7 +57,7 @@ export class Supervisor {
   readonly jamCount = [0, 0, 0, 0];
 
   constructor(
-    private readonly link: PlantLink,
+    private readonly link: PlantCommands,
     private readonly alarms: AlarmManager,
     private readonly shadow: ShadowModel,
   ) {}
@@ -108,7 +116,7 @@ export class Supervisor {
     }
     for (let k = 1; k < 4; k++) this.alarms.set(sensorAlarm(k), sh.sensorSuspect[k]);
 
-    this.alarms.set(ALARMS.vision, this.visionNoReads >= 2);
+    this.alarms.set(ALARMS.vision, this.visionNoReads >= 2, this.visionNoReadCamera);
   }
 
   checkLink(): void {

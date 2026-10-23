@@ -7,10 +7,21 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { GEOMETRY as G, PUSHER, SENSOR_IDS, SENSOR_LABEL, SENSOR_X, type SensorId } from '../plant/params';
+import {
+  CAMERAS,
+  GEOMETRY as G,
+  PUSHER,
+  SENSOR_IDS,
+  SENSOR_LABEL,
+  SENSOR_X,
+  type CameraId,
+  type DefectKind,
+  type Face,
+  type SensorId,
+} from '../plant/params';
 import type { PlantFrame } from '../bus/protocol';
 
-export type DeviceId = SensorId | 'M001' | 'ENC001' | 'CAM201' | 'YV301' | 'HL001' | 'ES001' | 'BELT';
+export type DeviceId = SensorId | CameraId | 'M001' | 'VT001' | 'ENC001' | 'YV301' | 'HL001' | 'ES001' | 'BELT';
 export type ViewName = 'iso' | 'side' | 'top' | 'inspect';
 
 /** Where the twin believes a carton is (drawn as a wireframe). */
@@ -37,6 +48,8 @@ const Y = G.deckHeight;
 const R = G.rollerRadius;
 const ROLLER_Y = Y - R - 0.002;
 const CAM_X = SENSOR_X.PE201 + 0.01;
+/** Carton centre when the vision tunnel fires (leading edge at PE-201 plus link latency). */
+const TUNNEL_X = SENSOR_X.PE201 - 0.015;
 const SX = SENSOR_IDS.map((id) => SENSOR_X[id]);
 
 function mat(color: number, rough = 0.6, metal = 0): THREE.MeshStandardMaterial {
@@ -51,11 +64,11 @@ const M = {
   rubber: mat(0x2a2e32, 0.95, 0),
   black: mat(0x1d2024, 0.55, 0.1),
   sensor: mat(0x3a4048, 0.5, 0.2),
-  reflector: mat(0xa31c1c, 0.3, 0.1),
   carton: mat(0xb5895a, 0.88, 0),
   tape: mat(0xc9a676, 0.6, 0),
   label: mat(0xf1f1ee, 0.7, 0),
   defectLabel: mat(0xc62828, 0.6, 0),
+  ink: mat(0x2747a8, 0.35, 0),
   bin: mat(0x58636d, 0.7, 0.1),
   safety: mat(0xf0bf00, 0.5, 0),
   mushroom: mat(0xc4161c, 0.35, 0),
@@ -149,10 +162,9 @@ export class TwinScene {
   private readonly ghostMat = new THREE.LineBasicMaterial({ color: 0x1f5fa0 });
   private readonly ghostOverdueMat = new THREE.LineBasicMaterial({ color: 0xe07b00 });
   private readonly itemGeom = new THREE.BoxGeometry(G.itemLength, G.itemHeight, G.itemWidth);
-  private readonly inspectionCam: THREE.PerspectiveCamera;
+  private readonly inspectionCams: { id: CameraId; cam: THREE.PerspectiveCamera }[] = [];
   private readonly inspectionTarget: THREE.WebGLRenderTarget;
-  readonly inspectionSize = { w: 160, h: 120 };
-  private readonly inspectionBuf: Uint8Array;
+  readonly inspectionSize = { w: 128, h: 96 };
   private readonly ringLight: THREE.MeshStandardMaterial;
   private readonly valveLed: THREE.MeshStandardMaterial;
   private readonly motorMat = mat(0x3f4c59, 0.45, 0.35);
@@ -244,13 +256,8 @@ export class TwinScene {
       new THREE.BoxGeometry(G.itemLength + 0.008, G.itemHeight + 0.008, G.itemWidth + 0.008),
     );
 
-    // Inspection camera = CAM-201 optics, looking straight down at the belt
-    this.inspectionCam = new THREE.PerspectiveCamera(30, 4 / 3, 0.02, 1);
-    this.inspectionCam.position.set(CAM_X - L / 2, Y + 0.225, 0);
-    this.inspectionCam.up.set(0, 0, -1);
-    this.inspectionCam.lookAt(CAM_X - L / 2, Y, 0);
-    this.inspectionTarget = new THREE.WebGLRenderTarget(this.inspectionSize.w, this.inspectionSize.h);
-    this.inspectionBuf = new Uint8Array(this.inspectionSize.w * this.inspectionSize.h * 4);
+    // All tunnel cameras render side by side into one target → a single GPU readback per carton
+    this.inspectionTarget = new THREE.WebGLRenderTarget(this.inspectionSize.w * this.inspectionCams.length, this.inspectionSize.h);
 
     this.selection = new THREE.BoxHelper(new THREE.Object3D(), 0x2d5f8b);
     this.selection.layers.set(LAYER_OVERLAY);
@@ -372,6 +379,18 @@ export class TwinScene {
     c.add(drive);
     this.device(drive, 'M001', 'M-001', new THREE.Vector3(0, 0.07, zFace + 0.1));
 
+    // VT-001 accelerometer stud-mounted on the gearbox at the drive-end bearing
+    const vt = new THREE.Group();
+    const vtBody = cylY(0.007, 0.018, M.steel, 16);
+    vtBody.position.y = 0.009;
+    const vtCable = cylY(0.0025, 0.012, M.black, 8);
+    vtCable.rotation.z = Math.PI / 2;
+    vtCable.position.set(0.011, 0.013, 0);
+    vt.add(vtBody, vtCable);
+    vt.position.set(L + 0.012, ROLLER_Y + 0.0375, zFace + 0.02);
+    c.add(vt);
+    this.device(vt, 'VT001', 'VT-001', new THREE.Vector3(0.04, 0.05, 0.02), 'minor');
+
     const enc = new THREE.Group();
     const encBody = cylZ(0.02, 0.03, M.black);
     encBody.position.z = -(W / 2 + 0.036);
@@ -394,16 +413,13 @@ export class TwinScene {
       const ledMat = new THREE.MeshStandardMaterial({ color: 0x3a2a08, emissive: 0xffa200, emissiveIntensity: 0 });
       const led = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.004, 0.008), ledMat);
       led.position.set(0, 0.04, -(W / 2 + 0.024));
-      const refl = box(0.016, 0.022, 0.003, M.reflector);
-      refl.position.set(0, 0.022, W / 2 + 0.014);
-      const reflPost = box(0.026, 0.004, 0.02, M.aluDark);
-      reflPost.position.set(0, 0.002, W / 2 + 0.014);
       const beamMat = new THREE.MeshBasicMaterial({ color: 0xff3b30, transparent: true, opacity: 0.35, depthWrite: false });
-      const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.0011, 0.0011, W + 0.03, 6), beamMat);
+      // Diffuse sensor: the light spot reaches across the belt (drawn as an overlay only)
+      const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.0011, 0.0011, W + 0.01, 6), beamMat);
       beam.rotation.x = Math.PI / 2;
-      beam.position.set(0, 0.022, 0);
+      beam.position.set(0, 0.022, -0.01);
       beam.layers.set(LAYER_OVERLAY);
-      g.add(bracket, body, led, refl, reflPost, beam);
+      g.add(bracket, body, led, beam);
       g.position.set(x, Y, 0);
       this.conveyor.add(g);
       this.sensorLed[id] = ledMat;
@@ -435,6 +451,64 @@ export class TwinScene {
     g.position.set(CAM_X, Y, 0);
     this.conveyor.add(g);
     this.device(g, 'CAM201', 'CAM-201', new THREE.Vector3(0, h + 0.03, 0));
+    this.addOptics('CAM201', new THREE.Vector3(CAM_X, Y + 0.225, 0), new THREE.Vector3(CAM_X, Y, 0), new THREE.Vector3(0, 0, -1));
+
+    // Side and end cameras complete the tunnel (bottom face would need a belt-gap camera)
+    const c = this.conveyor;
+    const target = new THREE.Vector3(TUNNEL_X, Y + G.itemHeight / 2, 0);
+    const endTarget = new THREE.Vector3(TUNNEL_X, Y + 0.02, 0);
+    for (const s of [-1, 1] as const) {
+      // Left camera sits a little upstream so the PE-201 body does not block its view
+      const pos = new THREE.Vector3(TUNNEL_X - (s < 0 ? 0.035 : 0), Y + 0.035, s * 0.21);
+      const id: CameraId = s < 0 ? 'CAM202' : 'CAM203';
+      const arm = box(0.02, 0.012, 0.11, M.aluDark);
+      arm.position.set(pos.x, Y - 0.075, s * 0.156);
+      const post = box(0.014, 0.1, 0.014, M.alu);
+      post.position.set(pos.x, Y - 0.03, pos.z);
+      c.add(arm, post);
+      this.tunnelCamera(id, pos, target);
+    }
+    const rail = box(0.4, 0.016, 0.016, M.alu);
+    rail.position.set(TUNNEL_X, Y + h - 0.01, 0);
+    c.add(rail);
+    for (const s of [1, -1] as const) {
+      const pos = new THREE.Vector3(TUNNEL_X + s * 0.17, Y + 0.17, 0);
+      const rod = box(0.01, h - 0.19, 0.01, M.alu);
+      rod.position.set(pos.x, Y + (h + 0.17) / 2, 0);
+      c.add(rod);
+      this.tunnelCamera(s > 0 ? 'CAM204' : 'CAM205', pos, endTarget);
+    }
+  }
+
+  /** Camera body + ring light aimed at the carton, plus its inspection optics and illumination. */
+  private tunnelCamera(id: CameraId, pos: THREE.Vector3, target: THREE.Vector3): void {
+    const g = new THREE.Group();
+    const body = box(0.03, 0.028, 0.04, M.black);
+    body.position.z = -0.014;
+    const lens = cylZ(0.008, 0.014, M.steel, 16);
+    lens.position.z = 0.012;
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.013, 0.0025, 8, 24), this.ringLight);
+    ring.position.z = 0.02;
+    g.add(body, lens, ring);
+    g.position.copy(pos);
+    this.conveyor.add(g);
+    this.conveyor.updateMatrixWorld(true);
+    g.lookAt(this.conveyor.localToWorld(target.clone()));
+    // No visible tag (the tunnel is crowded); the anchor still positions the faceplate
+    const label = CAMERAS.find((cam) => cam.id === id)!.label;
+    this.device(g, id, label, new THREE.Vector3(0, 0.035, 0), 'anchor-only');
+    this.addOptics(id, pos, target);
+    const light = new THREE.PointLight(0xffffff, 0.035, 0.5, 2);
+    light.position.copy(pos);
+    this.conveyor.add(light);
+  }
+
+  private addOptics(id: CameraId, pos: THREE.Vector3, target: THREE.Vector3, up?: THREE.Vector3): void {
+    const cam = new THREE.PerspectiveCamera(32, 4 / 3, 0.02, 1);
+    if (up) cam.up.copy(up);
+    cam.position.copy(pos).add(this.conveyor.position);
+    cam.lookAt(target.clone().add(this.conveyor.position));
+    this.inspectionCams.push({ id, cam });
   }
 
   private buildRejectStation(): void {
@@ -559,18 +633,62 @@ export class TwinScene {
     this.pusherRod.position.z = (front + back) / 2;
   }
 
-  private carton(defect: boolean): THREE.Group {
+  private carton(kind: DefectKind | null, face: Face | null): THREE.Group {
     const g = new THREE.Group();
     const body = new THREE.Mesh(this.itemGeom, M.carton);
     body.castShadow = true;
     body.receiveShadow = true;
     const tape = new THREE.Mesh(new THREE.BoxGeometry(G.itemLength + 0.001, 0.001, 0.012), M.tape);
     tape.position.y = G.itemHeight / 2 + 0.0005;
-    const lbl = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.0012, 0.018), defect ? M.defectLabel : M.label);
-    lbl.position.set(-0.012, G.itemHeight / 2 + 0.0008, 0.012);
-    if (defect) lbl.scale.set(1.35, 1, 1.3);
-    g.add(body, tape, lbl);
+    g.add(body, tape);
+    if (!(kind === 'label' && face === 'top')) {
+      const shipping = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.0012, 0.018), M.label);
+      shipping.position.set(-0.012, G.itemHeight / 2 + 0.0008, 0.012);
+      g.add(shipping);
+    }
+    if (kind && face) g.add(this.defectMark(kind, face));
     return g;
+  }
+
+  /** Wrong (red) label or blue ink stain on one carton face. */
+  private defectMark(kind: DefectKind, face: Face): THREE.Object3D {
+    const mark = new THREE.Group();
+    if (kind === 'label') {
+      mark.add(new THREE.Mesh(new THREE.PlaneGeometry(0.026, 0.02), M.defectLabel));
+    } else {
+      mark.add(new THREE.Mesh(new THREE.CircleGeometry(0.011, 20), M.ink));
+      for (const [x, y, r] of [[0.012, 0.008, 0.003], [-0.01, -0.01, 0.0025]]) {
+        const drop = new THREE.Mesh(new THREE.CircleGeometry(r, 10), M.ink);
+        drop.position.set(x, y, 0);
+        mark.add(drop);
+      }
+    }
+    const hx = G.itemLength / 2 + 0.0008;
+    const hy = G.itemHeight / 2 + 0.0008;
+    const hz = G.itemWidth / 2 + 0.0008;
+    switch (face) {
+      case 'top':
+        // above the packing tape and shipping label (their tops are ~1.4 mm above the face)
+        mark.rotation.x = -Math.PI / 2;
+        mark.position.set(0.008, hy + 0.0012, -0.004);
+        break;
+      case 'left':
+        mark.rotation.y = Math.PI;
+        mark.position.set(0.004, 0, -hz);
+        break;
+      case 'right':
+        mark.position.set(-0.004, 0, hz);
+        break;
+      case 'front':
+        mark.rotation.y = Math.PI / 2;
+        mark.position.set(hx, 0, 0);
+        break;
+      case 'back':
+        mark.rotation.y = -Math.PI / 2;
+        mark.position.set(-hx, 0, 0);
+        break;
+    }
+    return mark;
   }
 
   /** Draws a plant frame. `ageSec` > 0 extrapolates moving cartons between 25 Hz frames. */
@@ -608,7 +726,7 @@ export class TwinScene {
       seen.add(it.id);
       let mesh = this.items.get(it.id);
       if (!mesh) {
-        mesh = this.carton(it.defect);
+        mesh = this.carton(it.defectKind, it.defectFace);
         this.conveyor.add(mesh);
         this.items.set(it.id, mesh);
       }
@@ -673,21 +791,42 @@ export class TwinScene {
     };
   }
 
-  /** Renders the CAM-201 view off-screen and returns linear RGBA pixels (bottom-up rows). */
-  captureInspection(cameraOk: boolean): Uint8Array {
+  /**
+   * Renders every tunnel camera off-screen and returns linear RGBA pixels (bottom-up rows).
+   * A failed camera delivers a black frame.
+   */
+  captureInspection(failed: string): { id: CameraId; pixels: Uint8Array }[] {
     const r = this.renderer;
+    const rt = this.inspectionTarget;
+    const { w, h } = this.inspectionSize;
+    const n = this.inspectionCams.length;
     const prev = r.getRenderTarget();
-    r.setRenderTarget(this.inspectionTarget);
-    if (cameraOk) {
-      r.render(this.scene, this.inspectionCam);
-    } else {
-      r.setClearColor(0x000000, 1);
-      r.clear();
-    }
-    r.readRenderTargetPixels(this.inspectionTarget, 0, 0, this.inspectionSize.w, this.inspectionSize.h, this.inspectionBuf);
+    this.scene.updateMatrixWorld();
+    rt.scissorTest = true;
+    this.inspectionCams.forEach(({ id, cam }, i) => {
+      rt.viewport.set(i * w, 0, w, h);
+      rt.scissor.set(i * w, 0, w, h);
+      r.setRenderTarget(rt); // re-applies the target's viewport and scissor
+      if (id === failed) {
+        r.setClearColor(0x000000, 1);
+        r.clear();
+      } else {
+        r.render(this.scene, cam);
+      }
+    });
+    rt.scissorTest = false;
+    rt.viewport.set(0, 0, n * w, h);
+    const all = new Uint8Array(n * w * h * 4);
+    r.readRenderTargetPixels(rt, 0, 0, n * w, h, all);
     r.setRenderTarget(prev);
     this.flash = 1;
-    return this.inspectionBuf;
+
+    const row = w * 4;
+    return this.inspectionCams.map(({ id }, i) => {
+      const pixels = new Uint8Array(w * h * 4);
+      for (let y = 0; y < h; y++) pixels.set(all.subarray(y * n * row + i * row, y * n * row + (i + 1) * row), y * row);
+      return { id, pixels };
+    });
   }
 
   render(): void {
@@ -716,7 +855,7 @@ export class TwinScene {
       iso: [new THREE.Vector3(1.15, 1.45, 1.35), new THREE.Vector3(0, 0.72, 0)],
       side: [new THREE.Vector3(0, 0.98, 1.75), new THREE.Vector3(0, 0.74, 0)],
       top: [new THREE.Vector3(0, 2.35, 0.02), new THREE.Vector3(0, 0.78, 0)],
-      inspect: [new THREE.Vector3(cx + 0.3, Y + 0.32, 0.42), new THREE.Vector3(cx + 0.05, Y + 0.05, 0)],
+      inspect: [new THREE.Vector3(cx + 0.3, Y + 0.36, 0.52), new THREE.Vector3(cx - 0.02, Y + 0.06, 0)],
     };
     const [to, tTo] = views[v];
     this.tween = { from: this.camera.position.clone(), to, tFrom: this.controls.target.clone(), tTo, t: 0 };

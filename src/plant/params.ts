@@ -96,5 +96,45 @@ export const INSPECTION = {
   trackingWindow: 0.45, // max encoder travel PE-201 → PE-301 before a tracking entry is dropped [m]
 } as const;
 
+/** Carton faces. left = far side (−z), right = operator side (+z), front = leading face (+x). */
+export const FACES = ['top', 'left', 'right', 'front', 'back'] as const;
+export type Face = (typeof FACES)[number];
+
+/** Defects produced upstream: a wrong (red) label, or blue ink contamination. */
+export const DEFECT_KINDS = ['label', 'stain'] as const;
+export type DefectKind = (typeof DEFECT_KINDS)[number];
+
+/** Vision tunnel: five cameras triggered together by PE-201, one per visible carton face. */
+export const CAMERAS = [
+  { id: 'CAM201', label: 'CAM-201', face: 'top', view: 'Top' },
+  { id: 'CAM202', label: 'CAM-202', face: 'left', view: 'Left' },
+  { id: 'CAM203', label: 'CAM-203', face: 'right', view: 'Right' },
+  { id: 'CAM204', label: 'CAM-204', face: 'front', view: 'Front 45°' },
+  { id: 'CAM205', label: 'CAM-205', face: 'back', view: 'Back 45°' },
+] as const;
+export type CameraId = (typeof CAMERAS)[number]['id'];
+
+/** M-001 drive-end bearing (6204-type deep-groove ball bearing). Diameters in mm. */
+export const BEARING = { model: '6204', balls: 8, ballDiameter: 7.94, pitchDiameter: 33.5 } as const;
+
+/** VT-001 accelerometer: one waveform block per second (like a wireless condition-monitoring sensor). */
+export const VIBRATION = { fs: 2560, samples: 1024, periodS: 1 } as const;
+
+/** Characteristic bearing defect frequencies [Hz] for shaft frequency fr [Hz] (zero contact angle). */
+export function bearingFrequencies(fr: number) {
+  const r = BEARING.ballDiameter / BEARING.pitchDiameter;
+  const n = BEARING.balls;
+  return {
+    fr,
+    bpfo: (n / 2) * fr * (1 - r), // ball pass frequency, outer race
+    bpfi: (n / 2) * fr * (1 + r), // ball pass frequency, inner race
+    bsf: (BEARING.pitchDiameter / (2 * BEARING.ballDiameter)) * fr * (1 - r * r), // ball spin
+    ftf: (fr / 2) * (1 - r), // cage
+  };
+}
+
+/** Hidden fault for the learned anomaly model: a misaligned side guide rubbing cartons in zone 3. */
+export const GUIDE_RUB = { from: 0.86, to: 1.1, slowdown: 0.12, force: 1.2 } as const;
+
 /** Ideal cycle time used by OEE performance [s/item]. */
 export const IDEAL_CYCLE = GEOMETRY.pitch / DRIVE.designSpeed;

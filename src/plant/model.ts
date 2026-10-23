@@ -7,15 +7,23 @@
  */
 import {
   BELT,
+  DEFECT_KINDS,
   DRIVE,
   ENCODER,
+  FACES,
   GEOMETRY as G,
+  GUIDE_RUB,
   INSPECTION,
   MOTOR as M,
   PUSHER,
   SENSOR_IDS,
   SENSOR_X,
   THERMAL,
+  VIBRATION,
+  bearingFrequencies,
+  type CameraId,
+  type DefectKind,
+  type Face,
   type SensorId,
 } from './params';
 
@@ -101,6 +109,8 @@ export interface Item {
   z: number; // lateral offset from belt centreline [m]
   vy: number;
   defect: boolean;
+  defectKind: DefectKind | null;
+  defectFace: Face | null;
   phase: ItemPhase;
   dest: 'reject' | 'outfeed' | null;
 }
@@ -110,7 +120,9 @@ export interface FaultState {
   jam: boolean; // obstruction in zone 2
   sensorFail: SensorId | 'NONE'; // photo-eye output stuck off
   bearingWear: number; // 0..1, raises Coulomb friction
-  cameraFail: boolean; // CAM-201 delivers no image
+  wearRate: number; // progressive bearing degradation [fraction/s], demo-accelerated
+  cameraFail: CameraId | 'NONE'; // camera delivering no image
+  guideRub: boolean; // misaligned side guide in zone 3 (not modelled by the twin's rules)
   defectRate: number; // share of defective cartons from upstream
 }
 
@@ -198,7 +210,16 @@ export class Plant {
   private pusherTimer = 0;
 
   estop = false;
-  faults: FaultState = { slip: 0, jam: false, sensorFail: 'NONE', bearingWear: 0, cameraFail: false, defectRate: 0.12 };
+  faults: FaultState = {
+    slip: 0,
+    jam: false,
+    sensorFail: 'NONE',
+    bearingWear: 0,
+    wearRate: 0,
+    cameraFail: 'NONE',
+    guideRub: false,
+    defectRate: 0.12,
+  };
   lights = { red: false, amber: true, green: false, buzzer: false };
   events: PlantEvent[] = [];
 
@@ -388,7 +409,18 @@ export class Plant {
       if (laneClear) {
         const defect = this.rand() < this.faults.defectRate;
         if (defect) this.truth.defectsProduced++;
-        this.items.push({ id: this.nextItemId++, x: G.spawnX, y: 0, z: 0, vy: 0, defect, phase: 'conveying', dest: null });
+        this.items.push({
+          id: this.nextItemId++,
+          x: G.spawnX,
+          y: 0,
+          z: 0,
+          vy: 0,
+          defect,
+          defectKind: defect ? DEFECT_KINDS[Math.floor(this.rand() * DEFECT_KINDS.length)] : null,
+          defectFace: defect ? FACES[Math.floor(this.rand() * FACES.length)] : null,
+          phase: 'conveying',
+          dest: null,
+        });
         this.nextSpawnAt = this.beltDistance + G.pitch * (0.85 + 0.3 * this.rand());
       }
     }
@@ -459,6 +491,9 @@ export class Plant {
   private integrate(h: number): void {
     // Progressive faults: slip builds up over ~1.5 s, wear grows slowly and is repaired quickly
     this.slipActual += (this.faults.slip - this.slipActual) * Math.min(1, h / 1.5);
+    if (this.faults.wearRate > 0 && this.duty > 0) {
+      this.faults.bearingWear = Math.min(1, this.faults.bearingWear + this.faults.wearRate * h);
+    }
     const dw = 0.05 * h;
     this.wearActual += clamp(this.faults.bearingWear - this.wearActual, -dw * 10, dw);
 
@@ -467,6 +502,7 @@ export class Plant {
     for (const it of this.items) {
       if (it.phase === 'conveying') drag += BELT.muCarry * G.itemMass * GRAVITY;
       else if (it.phase === 'stopped') drag += BELT.muSlide * G.itemMass * GRAVITY;
+      if (this.rubbing(it)) drag += GUIDE_RUB.force;
     }
     const tLoad = (drag * G.rollerRadius) / (M.gearRatio * M.gearEfficiency);
     const tCoulomb = M.Tc * (1 + 5 * this.wearActual);
@@ -524,6 +560,11 @@ export class Plant {
     }
   }
 
+  /** A misaligned guide drags cartons in zone 3 against the belt. */
+  private rubbing(it: Item): boolean {
+    return this.faults.guideRub && it.phase === 'conveying' && it.x >= GUIDE_RUB.from && it.x <= GUIDE_RUB.to;
+  }
+
   private moveItems(h: number): void {
     const L = G.itemLength;
     const W = G.itemWidth;
@@ -534,7 +575,7 @@ export class Plant {
       switch (it.phase) {
         case 'conveying':
         case 'stopped': {
-          const free = it.x + this.beltSpeed * h;
+          const free = it.x + this.beltSpeed * (this.rubbing(it) ? 1 - GUIDE_RUB.slowdown : 1) * h;
           let limit = Infinity;
           if (this.faults.jam && it.x <= G.jamX + 1e-6) limit = G.jamX;
           if (ahead) limit = Math.min(limit, ahead.x - L - ACCUMULATION_GAP);
@@ -585,6 +626,44 @@ export class Plant {
     });
   }
 
+  // ───────────────────────────── VT-001 vibration ─────────────────────────────
+
+  accelRms = 0;
+
+  /**
+   * One acceleration waveform block [m/s²] from the drive-end bearing. Components are defined as
+   * velocity amplitudes (mm/s peak) and converted with a = v·2πf:
+   *   1× shaft (residual unbalance), 2× (alignment), 12× (gear mesh),
+   *   BPFO and harmonics — grow with outer-race wear, BPFI — small, plus broadband noise.
+   */
+  vibrationBlock(): Float32Array {
+    const { fs, samples } = VIBRATION;
+    const out = new Float32Array(samples);
+    const fr = this.omega / (2 * Math.PI);
+    const w = this.wearActual;
+    const comps: [number, number][] = [];
+    if (fr > 0.5) {
+      const bf = bearingFrequencies(fr);
+      comps.push([fr, 0.7 * Math.min(1.5, fr / 38)], [2 * fr, 0.22], [12 * fr, 0.12]);
+      for (let k = 1; k <= 3; k++) comps.push([k * bf.bpfo, (0.04 + 6.5 * Math.pow(w, 1.5)) / k]);
+      comps.push([bf.bpfi, 0.02 + 0.5 * w]);
+    }
+    const tones = comps
+      .filter(([f]) => f < fs / 2)
+      .map(([f, v]) => ({ f, a: (v / 1000) * 2 * Math.PI * f, ph: this.rand() * 2 * Math.PI }));
+    const noise = fr > 0.5 ? 0.15 + 2 * w : 0.03;
+    let sum = 0;
+    for (let i = 0; i < samples; i++) {
+      const t = i / fs;
+      let a = noise * this.gauss();
+      for (const tone of tones) a += tone.a * Math.sin(2 * Math.PI * tone.f * t + tone.ph);
+      out[i] = a;
+      sum += a * a;
+    }
+    this.accelRms = Math.sqrt(sum / samples);
+    return out;
+  }
+
   // ───────────────────────────── outputs ─────────────────────────────
 
   private gauss(): number {
@@ -606,6 +685,7 @@ export class Plant {
       'Drive.MotorCurrent': this.current + (this.omega > 0 ? this.gauss() * 0.03 : 0),
       'Drive.MotorTemp': Math.round((this.temperature + this.gauss() * 0.05) * 10) / 10,
       'Drive.MotorSpeed': (this.omega * 60) / (2 * Math.PI),
+      'Vibration.AccelRms': this.accelRms,
       'Sensors.EncoderCount': this.encoderCount,
       'Actuators.YV301': this.pusherPhase === 'extending' || this.pusherPhase === 'dwell',
       'Actuators.HL001_Red': this.lights.red,
@@ -626,6 +706,8 @@ export class Plant {
       'Simulation.Jam': this.faults.jam,
       'Simulation.SensorFault': this.faults.sensorFail,
       'Simulation.CameraFail': this.faults.cameraFail,
+      'Simulation.GuideRub': this.faults.guideRub,
+      'Simulation.WearRate': this.faults.wearRate,
       'Simulation.DefectRate': this.faults.defectRate,
       'Simulation.EscapedDefects': this.truth.escapedDefects,
       'Simulation.FalseRejects': this.truth.falseRejects,

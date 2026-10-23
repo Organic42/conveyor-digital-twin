@@ -25,6 +25,13 @@ export interface AxisSpec {
 
 export type Series = (number | null)[];
 
+/** Vertical marker drawn across the plot (e.g. a characteristic frequency). */
+export interface VLine {
+  x: number;
+  label: string;
+  color: string; // colour or CSS custom property name
+}
+
 const resolve = (c: string) => (c.startsWith('--') ? cssVar(c) : c);
 const FONT = '10px Segoe UI, system-ui, sans-serif';
 
@@ -39,6 +46,7 @@ export class TrendChart {
     private readonly pens: Pen[],
     private readonly axes: AxisSpec[],
     private readonly xTime = true,
+    private readonly vlines?: () => VLine[],
   ) {
     this.data = [[], ...pens.map(() => [])];
     this.build();
@@ -67,8 +75,30 @@ export class TrendChart {
       return s;
     });
 
+    const drawLines = (u: uPlot) => {
+      const lines = this.vlines?.() ?? [];
+      const ctx = u.ctx;
+      const px = uPlot.pxRatio;
+      for (const l of lines) {
+        const x = u.valToPos(l.x, 'x', true);
+        if (x < u.bbox.left || x > u.bbox.left + u.bbox.width) continue;
+        ctx.save();
+        ctx.strokeStyle = ctx.fillStyle = resolve(l.color);
+        ctx.lineWidth = px;
+        ctx.setLineDash([3 * px, 3 * px]);
+        ctx.beginPath();
+        ctx.moveTo(x, u.bbox.top);
+        ctx.lineTo(x, u.bbox.top + u.bbox.height);
+        ctx.stroke();
+        ctx.font = `${9 * px}px Segoe UI, system-ui, sans-serif`;
+        ctx.fillText(l.label, x + 3 * px, u.bbox.top + 10 * px);
+        ctx.restore();
+      }
+    };
+
     const opts: uPlot.Options = {
       title: this.title,
+      hooks: this.vlines ? { draw: [drawLines] } : undefined,
       width: Math.max(200, this.host.clientWidth),
       height: Math.max(80, this.host.clientHeight - 40),
       pxAlign: false,

@@ -11,7 +11,6 @@ export interface TagDef {
   writable?: boolean;
 }
 
-export const ENDPOINT = 'plant://line1-conveyor01';
 export const NAMESPACE = 'ns=2;s=DemoPlant.Area1.Line1.Conveyor01';
 export const nodeId = (path: string) => `${NAMESPACE}.${path}`;
 
@@ -27,6 +26,7 @@ export const TAG_DEFS: TagDef[] = [
   { path: 'Drive.MotorCurrent', type: 'Double', unit: 'A', decimals: 2, desc: 'M-001 armature current' },
   { path: 'Drive.MotorTemp', type: 'Double', unit: '°C', decimals: 1, desc: 'TT-001 winding temperature (PT100)' },
   { path: 'Drive.MotorSpeed', type: 'Double', unit: 'rpm', decimals: 0, desc: 'M-001 shaft speed' },
+  { path: 'Vibration.AccelRms', type: 'Double', unit: 'm/s²', decimals: 2, desc: 'VT-001 overall acceleration RMS (waveform published 1×/s)' },
 
   { path: 'Sensors.PE101', type: 'Boolean', desc: 'Diffuse photo-eye, infeed (24 V PNP)' },
   { path: 'Sensors.PE201', type: 'Boolean', desc: 'Diffuse photo-eye, vision trigger (24 V PNP)' },
@@ -47,7 +47,7 @@ export const TAG_DEFS: TagDef[] = [
   { path: 'Counters.Rejected', type: 'UInt32', desc: 'Cartons in reject bin' },
   { path: 'Counters.Outfeed', type: 'UInt32', desc: 'Cartons counted at PE-401' },
   { path: 'Tracking.QueueLength', type: 'Int32', desc: 'Cartons tracked between vision and reject' },
-  { path: 'Inspection.RequestId', type: 'UInt32', desc: 'Latest tracking id awaiting inspection' },
+  { path: 'Inspection.RequestId', type: 'UInt32', desc: 'Latest tracking id awaiting inspection (triggers all 5 cameras)' },
 
   { path: 'Simulation.SimTime', type: 'Double', unit: 's', decimals: 1, desc: 'Virtual plant only — simulation time' },
   { path: 'Simulation.BeltSpeedTrue', type: 'Double', unit: 'm/s', decimals: 3, desc: 'Virtual plant only — true belt speed' },
@@ -55,7 +55,9 @@ export const TAG_DEFS: TagDef[] = [
   { path: 'Simulation.BearingWear', type: 'Double', decimals: 2, desc: 'Virtual plant only — injected wear' },
   { path: 'Simulation.Jam', type: 'Boolean', desc: 'Virtual plant only — zone 2 obstruction' },
   { path: 'Simulation.SensorFault', type: 'String', desc: 'Virtual plant only — failed photo-eye' },
-  { path: 'Simulation.CameraFail', type: 'Boolean', desc: 'Virtual plant only — camera failure' },
+  { path: 'Simulation.CameraFail', type: 'String', desc: 'Virtual plant only — failed camera' },
+  { path: 'Simulation.GuideRub', type: 'Boolean', desc: 'Virtual plant only — zone 3 side-guide rub (unmodelled fault)' },
+  { path: 'Simulation.WearRate', type: 'Double', decimals: 3, desc: 'Virtual plant only — progressive wear rate [1/s]' },
   { path: 'Simulation.DefectRate', type: 'Double', decimals: 2, desc: 'Virtual plant only — upstream defect rate' },
   { path: 'Simulation.EscapedDefects', type: 'UInt32', desc: 'Virtual plant only — defects that reached outfeed' },
   { path: 'Simulation.FalseRejects', type: 'UInt32', desc: 'Virtual plant only — good cartons rejected' },
